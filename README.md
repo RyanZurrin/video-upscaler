@@ -192,16 +192,3 @@ BSRGAN by C. Zeng
 Stable Video Diffusion by Stability AI
 
 ---
-
-## 10. Need More?
-
-I can add:
-
-- screenshots
-- model benchmarking table
-- FPS and VRAM usage chart
-- automatic model downloader
-- Windows .bat launcher
-- full Jupyter notebook version
-
-Just tell me what you want added.
