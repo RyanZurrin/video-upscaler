@@ -1,112 +1,105 @@
 #!/usr/bin/env python3
-# run_all.py
-# Orchestrator: preprocess -> run 4 upscalers -> assemble videos -> build grid
+"""
+run_all.py
 
+High level orchestrator. Uses other scripts in the folder.
+All paths are CLI args or discovered from common.paths.
+"""
 import argparse
-import subprocess
 import os
+import subprocess
 from pathlib import Path
-import shutil
-import sys
-import cv2
+from common.paths import INPUT_DIR, MODELS_DIR, OUTPUT_DIR, TMP_DIR
+from common.fsutils import ensure_empty_dir, list_frames
 
-def call(cmd):
-    print("CALL:", " ".join(cmd))
+def run_preprocess(inp, tmp, denoise=False, median_k=3):
+    cmd = ["python", "pipelines/preprocess_video.py", "--input", inp, "--outdir", tmp]
+    if denoise:
+        cmd += ["--denoise", "--median_k", str(median_k)]
     subprocess.check_call(cmd)
 
-def build_grid(original, realesr, swinir, svd, outpath):
-    # scale each to same size and create 2x2 grid via ffmpeg
+def run_realesrgan_bin(bin_path, frames_dir, out_frames_dir, model_name):
+    # many ncnn builds accept folder mode; if not, fallback to per-file loop
+    out_frames_dir = str(out_frames_dir)
+    os.makedirs(out_frames_dir, exist_ok=True)
+    cmd = [bin_path, "-i", frames_dir, "-o", out_frames_dir, "-n", model_name]
+    subprocess.check_call(cmd)
+
+def frames_to_video(frames_dir, out_video, fps):
+    cmd = ["python", "pipelines/frames_to_video.py", "--frames", frames_dir, "--out", out_video, "--fps", str(int(fps))]
+    subprocess.check_call(cmd)
+
+def build_grid(outdir, orig_scaled, realesr, swinir, svd):
+    grid_path = os.path.join(outdir, "comparison_grid.mp4")
+    # call ffmpeg complex. Keep it simple: hstack and vstack
     cmd = [
-        "ffmpeg", "-y",
-        "-i", original, "-i", realesr, "-i", swinir, "-i", svd,
-        "-filter_complex",
-        "[0:v]scale=iw*2:ih*2[p0];"
-        "[1:v]scale=iw*2:ih*2[p1];"
-        "[2:v]scale=iw*2:ih*2[p2];"
-        "[3:v]scale=iw*2:ih*2[p3];"
-        "[p0][p1]hstack=inputs=2[top];"
-        "[p2][p3]hstack=inputs=2[bottom];"
-        "[top][bottom]vstack=inputs=2[grid]",
-        "-map", "[grid]", "-c:v", "libx264", "-crf", "20", "-preset", "medium", outpath
+      "ffmpeg", "-y", "-i", orig_scaled, "-i", realesr, "-i", swinir, "-i", svd,
+      "-filter_complex",
+      "[0:v]scale=iw:ih[p0];[1:v]scale=iw:ih[p1];[2:v]scale=iw:ih[p2];[3:v]scale=iw:ih[p3];"
+      "[p0][p1]hstack=inputs=2[top];[p2][p3]hstack=inputs=2[bottom];[top][bottom]vstack=inputs=2[grid]",
+      "-map", "[grid]", "-c:v", "libx264", "-crf", "20", "-preset", "medium", grid_path
     ]
     subprocess.check_call(cmd)
+    print("Grid saved to", grid_path)
+    return grid_path
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--input", required=True)
-    p.add_argument("--outdir", required=True)
-    p.add_argument("--realesr_ncnn", default=None, help="path to realesrgan-ncnn-vulkan.exe (optional)")
-    p.add_argument("--realesr_model_dir", default="models/realesrgan")
-    p.add_argument("--realesr_pth", default="models/realesrgan/realesr-general-x4v3.pth")
-    p.add_argument("--swinir_pth", default="models/swinir/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth")
-    p.add_argument("--bsrgan_pth", default="models/bsrgan/BSRGAN.pth")
+    p.add_argument("--input", required=True, help="input video file")
+    p.add_argument("--outdir", default=OUTPUT_DIR)
+    p.add_argument("--realesrgan_bin", default="", help="path to realesrgan-ncnn-vulkan.exe")
+    p.add_argument("--realesrgan_model", default="", help="name of model folder under models/realesrgan or path to model folder")
+    p.add_argument("--swinir_model", default=os.path.join(MODELS_DIR, "swinir"))
     p.add_argument("--svd_model", default="stabilityai/stable-video-diffusion-img2vid-xt")
     p.add_argument("--denoise", action="store_true")
     args = p.parse_args()
 
     outdir = Path(args.outdir)
-    tmp = outdir / "tmp"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    tmp.mkdir(parents=True)
-    frames_dir = tmp / "frames"
+    outdir.mkdir(parents=True, exist_ok=True)
+    tmp = Path(TMP_DIR)
+    ensure_empty_dir(str(tmp))
 
-    # 1. Preprocess
-    cmd = ["python", "preprocess_video.py", "--input", args.input, "--outdir", str(outdir)]
-    if args.denoise:
-        cmd += ["--denoise", "--median_k", "3"]
-    call(cmd)
+    # 1) preprocess
+    run_preprocess(args.input, str(tmp), denoise=args.denoise)
 
-    # frames dir possibly in outdir/tmp/frames
-    frames_dir = os.path.join(str(outdir), "tmp", "frames")
-    if not os.path.exists(frames_dir):
-        # fallback to outdir/tmp/frames naming difference
-        frames_dir = os.path.join(str(outdir), "tmp", "frames")
-    # get fps
-    cap = cv2.VideoCapture(args.input)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    cap.release()
+    frames_dir = tmp / "denoised" if args.denoise else tmp / "frames"
+    fps = float(subprocess.check_output(["ffprobe","-v","error","-select_streams","v:0","-show_entries","stream=r_frame_rate","-of","default=noprint_wrappers=1:nokey=1", args.input]).decode().strip().split('/')[0]) or 30
 
-    # 2. Real-ESRGAN (NCNN or py fallback)
-    realesr_frames = outdir / "out_realesr"
-    realesr_frames.mkdir(exist_ok=True)
-    cmd = ["python", "realesr_upscale.py", "--frames_dir", frames_dir, "--outdir", str(realesr_frames),
-           "--ncnn_bin", args.realesr_ncnn or "" , "--ncnn_model_dir", args.realesr_model_dir,
-           "--pth_model", args.realesr_pth]
-    call([c for c in cmd if c != ""])
+    # 2) Real-ESRGAN
+    reales_out = outdir / "realesrgan_frames"
+    ensure_empty_dir(str(reales_out))
+    if args.realesrgan_bin:
+        model_name = os.path.basename(args.realesrgan_model.rstrip("/\\"))
+        run_realesrgan_bin(args.realesrgan_bin, str(frames_dir), str(reales_out), model_name)
+    else:
+        print("No realesrgan binary specified; skipping.")
 
-    # 3. SwinIR
-    swinir_frames = outdir / "out_swinir"
-    swinir_frames.mkdir(exist_ok=True)
-    call(["python", "swinir_upscale.py", "--frames_dir", frames_dir, "--outdir", str(swinir_frames), "--model", args.swinir_pth, "--batch", "1"])
+    # 3) SwinIR
+    swinir_out = outdir / "swinir_frames"
+    ensure_empty_dir(str(swinir_out))
+    subprocess.check_call(["python","pipelines/swinir_upscale.py","--frames_dir", str(frames_dir), "--outdir", str(swinir_out),"--model", args.swinir_model, "--batch","1"])
 
-    # 4. BSRGAN
-    bsrgan_frames = outdir / "out_bsrgan"
-    bsrgan_frames.mkdir(exist_ok=True)
-    call(["python", "bsrgan_upscale.py", "--frames_dir", frames_dir, "--outdir", str(bsrgan_frames), "--model", args.bsrgan_pth])
+    # 4) SVD diffusion
+    svd_out = outdir / "svd_frames"
+    ensure_empty_dir(str(svd_out))
+    subprocess.check_call(["python","pipelines/svd_upscale.py","--frames_dir", str(frames_dir), "--outdir", str(svd_out), "--model", args.svd_model, "--steps","12"])
 
-    # 5. Diffusion SR (slow)
-    svd_frames = outdir / "out_svd"
-    svd_frames.mkdir(exist_ok=True)
-    call(["python", "svd_upscale.py", "--frames_dir", frames_dir, "--outdir", str(svd_frames), "--model", args.svd_model, "--steps", "12"])
+    # 5) frames -> videos
+    orig_scaled = os.path.join(outdir, "original_scaled.mp4")
+    subprocess.check_call(["ffmpeg","-y","-i", args.input, "-vf", "scale=iw*2:ih*2", "-c:v","libx264","-crf","20","-preset","medium", orig_scaled])
 
-    # 6. Reassemble each back to video
-    from frames_to_video import frames_to_video
-    realesr_vid = str(outdir / "realesr.mp4")
-    swinir_vid = str(outdir / "swinir.mp4")
-    bsrgan_vid = str(outdir / "bsrgan.mp4")
-    svd_vid = str(outdir / "svd.mp4")
-    orig_scaled = str(outdir / "original_scaled.mp4")
-    frames_to_video(str(realesr_frames), realesr_vid, fps=fps, crf=18, preset="slow")
-    frames_to_video(str(swinir_frames), swinir_vid, fps=fps, crf=18, preset="slow")
-    frames_to_video(str(bsrgan_frames), bsrgan_vid, fps=fps, crf=18, preset="slow")
-    frames_to_video(str(svd_frames), svd_vid, fps=fps, crf=18, preset="slow")
-    call(["ffmpeg", "-y", "-i", args.input, "-vf", "scale=iw*2:ih*2", "-c:v", "libx264", "-crf", "20", "-preset", "medium", orig_scaled])
+    r_vid = os.path.join(outdir, "realesrgan.mp4")
+    s_vid = os.path.join(outdir, "swinir.mp4")
+    d_vid = os.path.join(outdir, "svd.mp4")
+    frames_to_video(str(reales_out), r_vid, fps)
+    frames_to_video(str(swinir_out), s_vid, fps)
+    frames_to_video(str(svd_out), d_vid, fps)
 
-    # 7. Build comparison grid
-    grid = str(outdir / "comparison_grid.mp4")
-    build_grid(orig_scaled, realesr_vid, swinir_vid, svd_vid, grid)
-    print("Finished. Comparison grid at:", grid)
+    # 6) build grid and copy compare.html to outdir
+    grid = build_grid(outdir, orig_scaled, r_vid, s_vid, d_vid)
+    import shutil
+    shutil.copy(os.path.join(os.path.dirname(__file__), "compare.html"), os.path.join(outdir, "compare.html"))
+    print("Done. open", grid, "or", os.path.join(outdir,"compare.html"))
 
 if __name__ == "__main__":
     main()

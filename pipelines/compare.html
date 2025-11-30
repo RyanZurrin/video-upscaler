@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Video Compare</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        background: #111;
+        color: #eee;
+      }
+      #grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        max-width: 1400px;
+        margin: 10px auto;
+      }
+      video {
+        width: 100%;
+        background: black;
+      }
+      .controls {
+        text-align: center;
+        margin: 8px auto;
+      }
+      button {
+        margin: 0 6px;
+        padding: 8px 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2 style="text-align: center">Compare Videos - Sync Play/Pause/Seek</h2>
+    <div id="grid">
+      <video id="v0" controls src="original_scaled.mp4"></video>
+      <video id="v1" controls src="realesrgan.mp4"></video>
+      <video id="v2" controls src="swinir.mp4"></video>
+      <video id="v3" controls src="svd.mp4"></video>
+    </div>
+    <div class="controls">
+      <button id="play">Play</button>
+      <button id="pause">Pause</button>
+      <button id="step">Step +1 frame</button>
+      <input
+        id="seek"
+        type="range"
+        min="0"
+        max="100"
+        value="0"
+        style="width: 40%"
+      />
+    </div>
+    <script>
+      const vids = [0, 1, 2, 3].map((i) => document.getElementById("v" + i));
+      const playBtn = document.getElementById("play");
+      const pauseBtn = document.getElementById("pause");
+      const stepBtn = document.getElementById("step");
+      const seek = document.getElementById("seek");
+
+      function sync(action) {
+        if (action === "play") {
+          vids.forEach((v) => v.play());
+        }
+        if (action === "pause") {
+          vids.forEach((v) => v.pause());
+        }
+      }
+      playBtn.onclick = () => sync("play");
+      pauseBtn.onclick = () => sync("pause");
+
+      stepBtn.onclick = () => {
+        vids.forEach((v) => {
+          v.pause();
+          // advance ~one frame using current framerate assumption
+          const fps = v.frameRate || 30;
+          v.currentTime = Math.min(v.duration, v.currentTime + 1.0 / fps);
+        });
+      };
+
+      vids.forEach((v) => {
+        v.addEventListener("timeupdate", () => {
+          // use first video as master
+          if (v === vids[0]) {
+            const pct = (v.currentTime / v.duration) * 100 || 0;
+            seek.value = pct;
+            // sync others
+            vids.slice(1).forEach((w) => {
+              if (Math.abs(w.currentTime - v.currentTime) > 0.05) {
+                w.currentTime = v.currentTime;
+              }
+            });
+          }
+        });
+      });
+
+      seek.oninput = () => {
+        const p = seek.value / 100;
+        vids.forEach((v) => {
+          v.currentTime = v.duration * p;
+        });
+      };
+    </script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+import os
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+INPUT_DIR = os.path.join(ROOT, "input_videos")
+MODELS_DIR = os.path.join(ROOT, "models")
+OUTPUT_DIR = os.path.join(ROOT, "outputs")
+TMP_DIR = os.path.join(OUTPUT_DIR, "tmp")
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(TMP_DIR, exist_ok=True)

@@ -1,0 +1,25 @@
+name: vidsr
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - ffmpeg
+  - pytorch=2.2
+  - torchvision
+  - cudatoolkit=12.4
+  - pip:
+      - opencv-python-headless
+      - diffusers
+      - transformers
+      - accelerate
+      - safetensors
+      - tqdm
+      - ffmpeg-python
+      - pillow
+      - numpy
+      - scikit-image
+      - pyqt6
+      - soundfile
